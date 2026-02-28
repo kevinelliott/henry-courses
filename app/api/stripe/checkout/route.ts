@@ -1,50 +1,57 @@
-import { NextResponse } from 'next/server'
-import { stripe } from '@/lib/stripe'
-import { createClient } from '@/lib/supabase'
+import { NextRequest, NextResponse } from "next/server"
+import { stripe } from "@/lib/stripe"
+import { createServerClient } from "@supabase/ssr"
 
-export async function POST(req: Request) {
+export async function POST(request: NextRequest) {
   try {
-    const body = await req.json().catch(() => null) || await req.formData().catch(() => null)
-    let course_id: string, student_email: string
+    const body = await request.formData().catch(() => null)
+    const courseId = body?.get("courseId") as string || (await request.json().catch(() => ({})))?.courseId
 
-    if (body instanceof FormData) {
-      course_id = body.get('course_id') as string
-      student_email = body.get('student_email') as string || ''
-    } else {
-      course_id = body?.course_id
-      student_email = body?.student_email || ''
+    if (!courseId) {
+      return NextResponse.json({ error: "courseId required" }, { status: 400 })
     }
 
-    const supabase = createClient()
-    const { data: course } = await supabase.from('courses').select('*').eq('id', course_id).single()
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder.supabase.co",
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "placeholder-key",
+      { cookies: { getAll: () => request.cookies.getAll(), setAll: () => {} } }
+    )
 
-    if (!course) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
+    const { data: course } = await supabase.from("courses").select("*").eq("id", courseId).single()
+    if (!course) return NextResponse.json({ error: "Course not found" }, { status: 404 })
 
-    if (course.price === 0) {
-      return NextResponse.redirect(new URL(`/learn/${course.slug}`, req.url))
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
+
+    if (!stripe) {
+      return NextResponse.redirect(new URL("/c/" + course.slug, baseUrl))
     }
-
-    if (!stripe) return NextResponse.json({ error: 'Stripe not configured' }, { status: 500 })
 
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
+      payment_method_types: ["card"],
+      mode: "payment",
       line_items: [{
         price_data: {
-          currency: 'usd',
-          product_data: { name: course.title, description: course.description || '' },
-          unit_amount: Math.round(course.price * 100),
+          currency: "usd",
+          product_data: {
+            name: course.title,
+            description: course.description || undefined,
+          },
+          unit_amount: Math.round((course.price || 0) * 100),
         },
         quantity: 1,
       }],
-      mode: 'payment',
-      success_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/learn/${course.slug}?success=1`,
-      cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/c/${course.slug}`,
-      customer_email: student_email || undefined,
-      metadata: { course_id, student_email },
+      metadata: {
+        course_id: courseId,
+        instructor_id: course.user_id,
+      },
+      success_url: baseUrl + "/learn/" + course.slug + "?enrolled=true",
+      cancel_url: baseUrl + "/c/" + course.slug,
+      customer_creation: "always",
+      billing_address_collection: "auto",
     })
 
-    return NextResponse.redirect(session.url!)
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.redirect(session.url!, 303)
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
